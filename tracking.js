@@ -1,5 +1,39 @@
+/* =========================================================
+   RAWABAT ClientFlow — tracking.js
+   Meta Pixel + Advanced Front-End Tracking
+========================================================= */
+
 (function () {
-  const PIXEL_ID = "910167190291826";
+  const TRACKING_CONFIG = {
+    pixelId: "910167190291826",
+    debug: true,
+    sessionStorageKey: "rawabat_session_id",
+    utmStorageKey: "rawabat_utm_data",
+    eventStorageKey: "rawabat_event_log"
+  };
+
+  const state = {
+    pixelLoaded: false,
+    pageViewSent: false,
+    initialized: false
+  };
+
+  function log(name, data = {}) {
+    if (TRACKING_CONFIG.debug) {
+      console.log("[Rawabat Tracking]", name, data);
+    }
+  }
+
+  function getSessionId() {
+    let id = localStorage.getItem(TRACKING_CONFIG.sessionStorageKey);
+
+    if (!id) {
+      id = `rb_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem(TRACKING_CONFIG.sessionStorageKey, id);
+    }
+
+    return id;
+  }
 
   function getMarket() {
     const path = window.location.pathname.toLowerCase();
@@ -11,31 +45,78 @@
     return "global";
   }
 
+  function getPageType() {
+    const path = window.location.pathname.toLowerCase();
+
+    if (path === "/" || path === "/index.html") return "homepage";
+    if (path.includes("riyadh")) return "local_riyadh";
+    if (path.includes("jeddah")) return "local_jeddah";
+    if (path.includes("saudi")) return "country_saudi";
+
+    return "landing_page";
+  }
+
   function getUTMs() {
     const params = new URLSearchParams(window.location.search);
 
-    return {
-      utm_source: params.get("utm_source") || "",
-      utm_medium: params.get("utm_medium") || "",
-      utm_campaign: params.get("utm_campaign") || "",
-      utm_content: params.get("utm_content") || "",
-      utm_term: params.get("utm_term") || "",
+    const stored = (() => {
+      try {
+        return JSON.parse(localStorage.getItem(TRACKING_CONFIG.utmStorageKey) || "{}");
+      } catch {
+        return {};
+      }
+    })();
+
+    const data = {
+      utm_source: params.get("utm_source") || stored.utm_source || "direct",
+      utm_medium: params.get("utm_medium") || stored.utm_medium || "none",
+      utm_campaign: params.get("utm_campaign") || stored.utm_campaign || "none",
+      utm_content: params.get("utm_content") || stored.utm_content || "none",
+      utm_term: params.get("utm_term") || stored.utm_term || "none",
+      fbclid: params.get("fbclid") || stored.fbclid || "",
+      gclid: params.get("gclid") || stored.gclid || "",
+      referrer: document.referrer || stored.referrer || "direct",
+      landing_page: stored.landing_page || window.location.href
     };
+
+    localStorage.setItem(TRACKING_CONFIG.utmStorageKey, JSON.stringify(data));
+
+    return data;
+  }
+
+  function getCookie(name) {
+    const match = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));
+    return match ? match[2] : "";
+  }
+
+  function getEventId(eventName) {
+    return `rb_${eventName}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   }
 
   function basePayload(extra = {}) {
     return {
       market: getMarket(),
+      page_type: getPageType(),
       page_url: window.location.href,
       page_path: window.location.pathname,
       page_title: document.title,
+      session_id: getSessionId(),
+      fbp: getCookie("_fbp"),
+      fbc: getCookie("_fbc"),
       ...getUTMs(),
-      ...extra,
+      ...extra
     };
   }
 
+  function hasPixel() {
+    return typeof window.fbq === "function";
+  }
+
   function loadMetaPixel() {
-    if (window.fbq) return;
+    if (hasPixel()) {
+      state.pixelLoaded = true;
+      return;
+    }
 
     !(function (f, b, e, v, n, t, s) {
       if (f.fbq) return;
@@ -66,60 +147,154 @@
       "https://connect.facebook.net/en_US/fbevents.js"
     );
 
-    fbq("init", PIXEL_ID);
-    fbq("track", "PageView", basePayload());
-    fbq("trackCustom", "MarketPageView", basePayload());
+    state.pixelLoaded = true;
+  }
+
+  function initPixel() {
+    loadMetaPixel();
+
+    if (!hasPixel()) {
+      log("PixelBlockedOrUnavailable", {
+        reason: "fbq_not_available"
+      });
+      return;
+    }
+
+    fbq("init", TRACKING_CONFIG.pixelId);
+
+    if (!state.pageViewSent) {
+      const eventID = getEventId("PageView");
+
+      fbq("track", "PageView", basePayload(), { eventID });
+
+      state.pageViewSent = true;
+
+      log("PageView", {
+        eventID,
+        ...basePayload()
+      });
+    }
+
+    trackCustom("MarketPageView", {
+      market: getMarket(),
+      page_type: getPageType()
+    });
+  }
+
+  function saveEventLog(eventName, payload = {}) {
+    try {
+      const current = JSON.parse(localStorage.getItem(TRACKING_CONFIG.eventStorageKey) || "[]");
+      current.push({
+        eventName,
+        payload,
+        at: new Date().toISOString()
+      });
+
+      localStorage.setItem(
+        TRACKING_CONFIG.eventStorageKey,
+        JSON.stringify(current.slice(-50))
+      );
+    } catch {}
   }
 
   function trackStandard(eventName, extra = {}) {
-    if (typeof fbq === "function") {
-      fbq("track", eventName, basePayload(extra));
+    const eventID = getEventId(eventName);
+    const payload = basePayload({
+      event_id: eventID,
+      funnel: "clientflow_restaurants",
+      ...extra
+    });
+
+    if (hasPixel()) {
+      fbq("track", eventName, payload, { eventID });
     }
+
+    saveEventLog(eventName, payload);
+    log(eventName, payload);
   }
 
   function trackCustom(eventName, extra = {}) {
-    if (typeof fbq === "function") {
-      fbq("trackCustom", eventName, basePayload(extra));
+    const eventID = getEventId(eventName);
+    const payload = basePayload({
+      event_id: eventID,
+      funnel: "clientflow_restaurants",
+      ...extra
+    });
+
+    if (hasPixel()) {
+      fbq("trackCustom", eventName, payload, { eventID });
+    }
+
+    saveEventLog(eventName, payload);
+    log(eventName, payload);
+  }
+
+  function handleRawabatTrack(event) {
+    const detail = event.detail || {};
+    const name = detail.name || "CustomEvent";
+    const type = detail.type || "custom";
+    const eventName = detail.event_name || name;
+
+    const payload = { ...detail };
+    delete payload.name;
+    delete payload.type;
+    delete payload.event_name;
+
+    if (type === "standard") {
+      trackStandard(eventName, payload);
+    } else {
+      trackCustom(eventName, payload);
     }
   }
 
-  function initWhatsAppTracking() {
+  function initClickTracking() {
     document.querySelectorAll("[data-track-lead]").forEach((el) => {
       el.addEventListener("click", function () {
         const source = el.dataset.trackLead || "unknown_lead_click";
+        const href = el.getAttribute("href") || "";
 
         trackStandard("Lead", {
           source,
-          lead_type: "whatsapp_click",
+          lead_type: "cta_click",
+          href
         });
 
         trackCustom("whatsapp_click", {
           source,
+          href
         });
       });
     });
-  }
 
-  function initContactTracking() {
     document.querySelectorAll("[data-track-contact]").forEach((el) => {
       el.addEventListener("click", function () {
         const source = el.dataset.trackContact || "unknown_contact_click";
+        const href = el.getAttribute("href") || "";
 
         trackStandard("Contact", {
           source,
-          contact_type: "form_or_cta_click",
+          contact_type: "cta_click",
+          href
         });
 
         trackCustom("form_start", {
           source,
+          href
+        });
+      });
+    });
+
+    document.querySelectorAll("a[href^='mailto:']").forEach((el) => {
+      el.addEventListener("click", function () {
+        trackCustom("email_click", {
+          source: el.href
         });
       });
     });
   }
 
-  function initFormTracking() {
+  function initFormStartedTracking() {
     const form = document.getElementById("smartLeadForm");
-
     if (!form) return;
 
     const fields = form.querySelectorAll("input, select, textarea");
@@ -128,115 +303,74 @@
       field.addEventListener(
         "focus",
         function () {
-          if (form.dataset.started === "true") return;
+          if (form.dataset.trackingStarted === "true") return;
 
-          form.dataset.started = "true";
+          form.dataset.trackingStarted = "true";
+
+          trackStandard("Contact", {
+            source: "smart_form_started",
+            contact_type: "form_focus"
+          });
 
           trackCustom("form_started", {
-            source: "smart_form",
+            source: "smart_form"
           });
         },
         { once: true }
       );
     });
-
-    form.addEventListener("submit", function () {
-      const data = new FormData(form);
-
-      trackStandard("Lead", {
-        source: "smart_form_submit",
-        lead_type: "qualified_form_submit",
-        restaurant: data.get("restaurant") || "",
-        location: data.get("location") || "",
-        branches: data.get("branches") || "",
-        messages: data.get("messages") || "",
-        package: data.get("package") || "",
-      });
-
-      trackCustom("qualified_lead", {
-        source: "smart_form",
-        restaurant: data.get("restaurant") || "",
-        location: data.get("location") || "",
-        branches: data.get("branches") || "",
-        messages: data.get("messages") || "",
-        package: data.get("package") || "",
-      });
-    });
   }
 
-  function initScrollTracking() {
-    let tracked25 = false;
-    let tracked50 = false;
-    let tracked75 = false;
-    let tracked90 = false;
+  function initVisibilityTracking() {
+    let sent = false;
 
-    window.addEventListener(
-      "scroll",
-      function () {
-        const docHeight =
-          document.documentElement.scrollHeight - window.innerHeight;
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden" && !sent) {
+        sent = true;
 
-        if (docHeight <= 0) return;
-
-        const percent = Math.round((window.scrollY / docHeight) * 100);
-
-        if (percent >= 25 && !tracked25) {
-          tracked25 = true;
-          trackCustom("ScrollDepth", { depth: 25 });
-        }
-
-        if (percent >= 50 && !tracked50) {
-          tracked50 = true;
-          trackCustom("ScrollDepth", { depth: 50 });
-        }
-
-        if (percent >= 75 && !tracked75) {
-          tracked75 = true;
-          trackCustom("ScrollDepth", { depth: 75 });
-        }
-
-        if (percent >= 90 && !tracked90) {
-          tracked90 = true;
-          trackCustom("ScrollDepth", { depth: 90 });
-        }
-      },
-      { passive: true }
-    );
-  }
-
-  function initFAQTracking() {
-    document.querySelectorAll("details").forEach((item) => {
-      item.addEventListener("toggle", function () {
-        if (!item.open) return;
-
-        const question = item.querySelector("summary")?.innerText || "";
-
-        trackCustom("FAQOpened", {
-          question,
+        trackCustom("PageHidden", {
+          time_on_page_ms: Math.round(performance.now())
         });
-      });
+      }
     });
   }
 
-  function initOutboundTracking() {
-    document.querySelectorAll("a[href^='mailto:']").forEach((el) => {
-      el.addEventListener("click", function () {
-        trackCustom("email_click", {
-          source: el.href,
-        });
+  function initEngagedSessionTracking() {
+    let sent = false;
+
+    setTimeout(() => {
+      if (sent) return;
+      sent = true;
+
+      trackCustom("EngagedSession", {
+        time_on_page_seconds: 30
       });
-    });
+    }, 30000);
   }
 
   function init() {
-    loadMetaPixel();
-    initWhatsAppTracking();
-    initContactTracking();
-    initFormTracking();
-    initScrollTracking();
-    initFAQTracking();
-    initOutboundTracking();
+    if (state.initialized) return;
+    state.initialized = true;
+
+    getUTMs();
+    initPixel();
+    initClickTracking();
+    initFormStartedTracking();
+    initVisibilityTracking();
+    initEngagedSessionTracking();
+
+    window.addEventListener("rawabat:track", handleRawabatTrack);
   }
 
-  document.addEventListener("DOMContentLoaded", init);
+  document.readyState === "loading"
+    ? document.addEventListener("DOMContentLoaded", init)
+    : init();
+
+  window.RawabatTracking = {
+    trackStandard,
+    trackCustom,
+    basePayload,
+    getMarket,
+    getUTMs
+  };
 })();
