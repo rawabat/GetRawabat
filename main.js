@@ -1,6 +1,7 @@
 /* =========================================================
    RAWABAT ClientFlow — main.js
-   Advanced Ads Tracking Version
+   UI + Form Logic Only
+   No Meta Pixel / No fbq here
 ========================================================= */
 
 const CONFIG = {
@@ -23,7 +24,6 @@ const state = {
   pricingViewed: false,
   formStarted: false,
   leadSubmitted: false,
-  whatsappClicked: false,
   trackedSteps: new Set()
 };
 
@@ -31,13 +31,18 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
 function logEvent(name, data = {}) {
-  if (CONFIG.debug) {
-    console.log("[Rawabat Tracking]", name, data);
-  }
+  if (CONFIG.debug) console.log("[Rawabat UI]", name, data);
 }
 
-function hasPixel() {
-  return typeof window.fbq === "function";
+function dispatchTrackingEvent(name, detail = {}) {
+  window.dispatchEvent(
+    new CustomEvent("rawabat:track", {
+      detail: {
+        name,
+        ...detail
+      }
+    })
+  );
 }
 
 function getSessionId() {
@@ -75,86 +80,6 @@ function getUtmData() {
   return data;
 }
 
-function basePayload(extra = {}) {
-  return {
-    ...getUtmData(),
-    page_path: window.location.pathname,
-    page_title: document.title,
-    timestamp: new Date().toISOString(),
-    ...extra
-  };
-}
-
-function initMetaPixel() {
-  if (hasPixel()) return;
-
-  (function (f, b, e, v, n, t, s) {
-    if (f.fbq) return;
-    n = f.fbq = function () {
-      n.callMethod ? n.callMethod.apply(n, arguments) : n.queue.push(arguments);
-    };
-    if (!f._fbq) f._fbq = n;
-    n.push = n;
-    n.loaded = true;
-    n.version = "2.0";
-    n.queue = [];
-    t = b.createElement(e);
-    t.async = true;
-    t.src = v;
-    s = b.getElementsByTagName(e)[0];
-    s.parentNode.insertBefore(t, s);
-  })(window, document, "script", "https://connect.facebook.net/en_US/fbevents.js");
-
-  fbq("init", "910167190291826");
-  fbq("track", "PageView", basePayload({ event_source: "page_load" }));
-
-  logEvent("PageView", basePayload({ event_source: "page_load" }));
-}
-
-function trackStandard(eventName, payload = {}) {
-  const data = basePayload(payload);
-
-  if (hasPixel()) {
-    fbq("track", eventName, data);
-  }
-
-  logEvent(eventName, data);
-}
-
-function trackCustom(eventName, payload = {}) {
-  const data = basePayload(payload);
-
-  if (hasPixel()) {
-    fbq("trackCustom", eventName, data);
-  }
-
-  logEvent(eventName, data);
-}
-
-function trackLead(label = "lead", extra = {}) {
-  trackStandard("Lead", {
-    content_name: label,
-    funnel: "clientflow_restaurants",
-    ...extra
-  });
-}
-
-function trackContact(label = "contact", extra = {}) {
-  trackStandard("Contact", {
-    content_name: label,
-    funnel: "clientflow_restaurants",
-    ...extra
-  });
-}
-
-function trackViewContent(label = "content", extra = {}) {
-  trackStandard("ViewContent", {
-    content_name: label,
-    funnel: "clientflow_restaurants",
-    ...extra
-  });
-}
-
 function getForm() {
   return $("#smartLeadForm");
 }
@@ -170,6 +95,30 @@ function normalizePhone(value) {
 
 function getWhatsAppUrl(message) {
   return `https://wa.me/${CONFIG.whatsappNumber}?text=${encodeURIComponent(message)}`;
+}
+
+function calculateLeadScore() {
+  const data = getData();
+
+  let score = 55;
+
+  if (String(data.name || "").trim()) score += 8;
+  if (normalizePhone(data.phone).length >= 8) score += 12;
+  if (String(data.restaurant || "").trim()) score += 10;
+  if (String(data.location || "").trim()) score += 8;
+  if (data.messages && !String(data.messages).includes("أقل")) score += 7;
+  if (data.menu_status && String(data.menu_status).includes("جاهز")) score += 5;
+  if (data.branches && !String(data.branches).includes("فرع واحد")) score += 5;
+  if (data.package && !String(data.package).includes("Starter")) score += 5;
+  if (data.problem && String(data.problem).trim().length > 10) score += 8;
+
+  return Math.min(score, 100);
+}
+
+function getLeadQuality(score = calculateLeadScore()) {
+  if (score >= 85) return "hot";
+  if (score >= 70) return "warm";
+  return "cold";
 }
 
 function buildLeadSummary() {
@@ -242,24 +191,6 @@ function validateStep(step) {
   return (CONFIG.requiredByStep[step] || []).every(validateField);
 }
 
-function calculateLeadScore() {
-  const data = getData();
-
-  let score = 55;
-
-  if (String(data.name || "").trim()) score += 8;
-  if (normalizePhone(data.phone).length >= 8) score += 12;
-  if (String(data.restaurant || "").trim()) score += 10;
-  if (String(data.location || "").trim()) score += 8;
-  if (data.messages && !String(data.messages).includes("أقل")) score += 7;
-  if (data.menu_status && String(data.menu_status).includes("جاهز")) score += 5;
-  if (data.branches && !String(data.branches).includes("فرع واحد")) score += 5;
-  if (data.package && !String(data.package).includes("Starter")) score += 5;
-  if (data.problem && String(data.problem).trim().length > 10) score += 8;
-
-  return Math.min(score, 100);
-}
-
 function updateLeadScore() {
   const score = calculateLeadScore();
   const bar = $("#leadScoreBar");
@@ -268,9 +199,10 @@ function updateLeadScore() {
   if (bar) bar.style.width = score + "%";
   if (text) text.textContent = score + "%";
 
-  trackCustom("LeadScoreUpdated", {
+  dispatchTrackingEvent("LeadScoreUpdated", {
+    type: "custom",
     score,
-    lead_quality: score >= 85 ? "hot" : score >= 70 ? "warm" : "cold"
+    lead_quality: getLeadQuality(score)
   });
 }
 
@@ -307,7 +239,8 @@ function trackFormStep(step) {
 
   state.trackedSteps.add(step);
 
-  trackCustom("FormStep", {
+  dispatchTrackingEvent("FormStep", {
+    type: "custom",
     step,
     progress: Math.round((step / CONFIG.totalSteps) * 100),
     score: calculateLeadScore()
@@ -316,9 +249,11 @@ function trackFormStep(step) {
 
 function goStep(direction) {
   if (direction > 0 && !validateStep(state.currentStep)) {
-    trackCustom("FormValidationError", {
+    dispatchTrackingEvent("FormValidationError", {
+      type: "custom",
       step: state.currentStep
     });
+
     return;
   }
 
@@ -344,12 +279,44 @@ async function copyLeadSummary() {
     await navigator.clipboard.writeText(text);
     showSuccess();
 
-    trackContact("copy_lead_summary", {
+    dispatchTrackingEvent("CopyLeadSummary", {
+      type: "standard",
+      event_name: "Contact",
+      source: "copy_lead_summary",
       score: calculateLeadScore()
     });
   } catch (error) {
     alert(text);
   }
+}
+
+function openTrackedWhatsApp(message, extra = {}) {
+  const clickId = `wa_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const url = getWhatsAppUrl(message);
+
+  try {
+    localStorage.setItem("rawabat_last_whatsapp_click_id", clickId);
+  } catch (error) {}
+
+  dispatchTrackingEvent("WhatsAppClick", {
+    type: "standard",
+    event_name: "Lead",
+    source: "open_tracked_whatsapp",
+    click_id: clickId,
+    lead_type: "whatsapp_click",
+    score: calculateLeadScore(),
+    ...extra
+  });
+
+  dispatchTrackingEvent("whatsapp_click", {
+    type: "custom",
+    source: "open_tracked_whatsapp",
+    click_id: clickId,
+    score: calculateLeadScore(),
+    ...extra
+  });
+
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 function submitSmartForm(event) {
@@ -363,7 +330,8 @@ function submitSmartForm(event) {
     state.currentStep = 1;
     updateSmartProgress();
 
-    trackCustom("SubmitBlocked", {
+    dispatchTrackingEvent("SubmitBlocked", {
+      type: "custom",
       reason: "required_fields_missing"
     });
 
@@ -378,23 +346,28 @@ function submitSmartForm(event) {
 
   try {
     localStorage.setItem(CONFIG.storageKey, summary);
-  } catch (error) {
-    console.warn("Could not save lead summary", error);
-  }
+  } catch (error) {}
 
   showSuccess();
 
-  trackLead("qualified_lead", {
-    status: "qualified",
+  dispatchTrackingEvent("QualifiedLead", {
+    type: "standard",
+    event_name: "Lead",
+    source: "smart_form_submit",
+    lead_type: "qualified_form_submit",
     score,
-    lead_quality: score >= 85 ? "hot" : score >= 70 ? "warm" : "cold",
-    restaurant: data.restaurant || "",
-    location: data.location || "",
-    package: data.package || ""
+    lead_quality: getLeadQuality(score),
+    package: data.package || "",
+    messages: data.messages || "",
+    branches: data.branches || "",
+    location_present: Boolean(data.location)
   });
 
-  trackCustom("QualifiedLead", {
+  dispatchTrackingEvent("qualified_lead", {
+    type: "custom",
+    source: "smart_form_submit",
     score,
+    lead_quality: getLeadQuality(score),
     package: data.package || "",
     messages: data.messages || "",
     branches: data.branches || ""
@@ -407,52 +380,25 @@ function submitSmartForm(event) {
   });
 }
 
-function openTrackedWhatsApp(message, extra = {}) {
-  const clickId = `wa_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  const url = getWhatsAppUrl(message);
-
-  try {
-    localStorage.setItem("rawabat_last_whatsapp_click_id", clickId);
-  } catch (error) {}
-
-  trackLead("whatsapp_click", {
-    click_id: clickId,
-    ...extra
-  });
-
-  trackLead("whatsapp_conversion", {
-    click_id: clickId,
-    ...extra
-  });
-
-  trackCustom("WhatsAppClick", {
-    click_id: clickId,
-    ...extra
-  });
-
-  window.open(url, "_blank", "noopener,noreferrer");
-}
-
 function handleScroll() {
   const nav = $("#nav");
-  if (nav) nav.classList.toggle("is-scrolled", scrollY > 40);
+  if (nav) nav.classList.toggle("is-scrolled", window.scrollY > 40);
 
   const pricing = $("#pricing");
 
   if (
     pricing &&
     !state.pricingViewed &&
-    pricing.getBoundingClientRect().top < innerHeight * 0.75
+    pricing.getBoundingClientRect().top < window.innerHeight * 0.75
   ) {
     state.pricingViewed = true;
 
-    trackViewContent("pricing_view", {
+    dispatchTrackingEvent("PricingView", {
+      type: "standard",
+      event_name: "ViewContent",
+      content_name: "pricing_view",
       intent: "high",
-      section: "pricing"
-    });
-
-    trackCustom("PricingView", {
-      intent: "high",
+      section: "pricing",
       score: calculateLeadScore()
     });
   }
@@ -481,40 +427,6 @@ function initReveal() {
   elements.forEach((element) => observer.observe(element));
 }
 
-function initTrackingLinks() {
-  const whatsappLinks = $$("a[href*='wa.me'], a[href*='whatsapp'], [data-track-lead]");
-
-  whatsappLinks.forEach((element) => {
-    element.addEventListener("click", () => {
-      const label = element.dataset.trackLead || "whatsapp_link";
-      const href = element.getAttribute("href") || "";
-
-      trackLead("whatsapp_click", {
-        button_label: label,
-        href,
-        source: "link_click",
-        score: calculateLeadScore()
-      });
-
-      if (label && label !== "whatsapp_click") {
-        trackCustom("SpecificButtonClick", {
-          button_label: label,
-          href,
-          score: calculateLeadScore()
-        });
-      }
-    });
-  });
-
-  $$("[data-track-contact]").forEach((element) => {
-    element.addEventListener("click", () => {
-      trackContact(element.dataset.trackContact || "contact_click", {
-        score: calculateLeadScore()
-      });
-    });
-  });
-}
-
 function initForm() {
   const form = getForm();
   if (!form) return;
@@ -523,12 +435,8 @@ function initForm() {
     if (!state.formStarted) {
       state.formStarted = true;
 
-      trackContact("form_start", {
-        step: 1,
-        score: calculateLeadScore()
-      });
-
-      trackCustom("FormStarted", {
+      dispatchTrackingEvent("FormStarted", {
+        type: "custom",
         step: 1,
         score: calculateLeadScore()
       });
@@ -550,164 +458,60 @@ function initForm() {
   $("#copyLeadSummaryBtn")?.addEventListener("click", copyLeadSummary);
 }
 
-function initPageTracking() {
-  trackViewContent("landing_view", {
-    section: "hero",
-    funnel_step: "landing"
-  });
-
-  trackCustom("LandingPageViewed", {
-    funnel: "clientflow_restaurants"
-  });
-}
-
-function init() {
-  initMetaPixel();
-  setHiddenTracking();
-  initTrackingLinks();
-  initForm();
-  initReveal();
-  updateSmartProgress();
-  updateLeadScore();
-  handleScroll();
-  initPageTracking();
-
-  addEventListener("scroll", handleScroll, { passive: true });
-}
-
-document.readyState === "loading"
-  ? document.addEventListener("DOMContentLoaded", init)
-  : init();
-
-/* =========================================================
-   EXTRA SEO + UX + CRO ENHANCEMENTS
-========================================================= */
-
 function initScrollDepthTracking() {
   let tracked25 = false;
   let tracked50 = false;
   let tracked75 = false;
-  let tracked100 = false;
+  let tracked90 = false;
 
   function handleDepth() {
-    const scrollTop = window.scrollY;
-    const docHeight =
-      document.documentElement.scrollHeight - window.innerHeight;
-
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
     if (docHeight <= 0) return;
 
-    const percent = Math.round((scrollTop / docHeight) * 100);
+    const percent = Math.round((window.scrollY / docHeight) * 100);
 
     if (percent >= 25 && !tracked25) {
       tracked25 = true;
-
-      trackCustom("ScrollDepth", {
-        depth: 25
-      });
+      dispatchTrackingEvent("ScrollDepth", { type: "custom", depth: 25 });
     }
 
     if (percent >= 50 && !tracked50) {
       tracked50 = true;
-
-      trackCustom("ScrollDepth", {
-        depth: 50
-      });
+      dispatchTrackingEvent("ScrollDepth", { type: "custom", depth: 50 });
     }
 
     if (percent >= 75 && !tracked75) {
       tracked75 = true;
-
-      trackCustom("ScrollDepth", {
-        depth: 75
-      });
+      dispatchTrackingEvent("ScrollDepth", { type: "custom", depth: 75 });
     }
 
-    if (percent >= 95 && !tracked100) {
-      tracked100 = true;
-
-      trackCustom("ScrollDepth", {
-        depth: 100
-      });
+    if (percent >= 90 && !tracked90) {
+      tracked90 = true;
+      dispatchTrackingEvent("ScrollDepth", { type: "custom", depth: 90 });
     }
   }
 
-  window.addEventListener("scroll", handleDepth, {
-    passive: true
-  });
+  window.addEventListener("scroll", handleDepth, { passive: true });
 }
 
-function initExitIntent() {
-  let shown = false;
-
-  document.addEventListener("mouseout", (event) => {
-    if (shown) return;
-
-    if (event.clientY <= 0) {
-      shown = true;
-
-      trackCustom("ExitIntentTriggered", {
-        score: calculateLeadScore()
-      });
-
-      const shouldOpen = confirm(
-        "🔥 قبل ما تمشي...\n\nهل تريد مشاهدة Demo سريع لـ ClientFlow على واتساب؟"
-      );
-
-      if (shouldOpen) {
-        openTrackedWhatsApp(
-          "مرحبًا، أريد مشاهدة Demo سريع لـ ClientFlow",
-          {
-            source: "exit_intent"
-          }
-        );
-      }
-    }
-  });
-}
-
-function initSEOInteractions() {
+function initFAQTracking() {
   $$("details").forEach((item) => {
     item.addEventListener("toggle", () => {
-      if (item.open) {
-        const question =
-          item.querySelector("summary")?.textContent || "";
+      if (!item.open) return;
 
-        trackCustom("FAQOpened", {
-          question
-        });
-      }
+      const question = item.querySelector("summary")?.textContent || "";
+
+      dispatchTrackingEvent("FAQOpened", {
+        type: "custom",
+        question
+      });
     });
-  });
-}
-
-function initMarketTracking() {
-  const path = window.location.pathname;
-
-  let market = "global";
-
-  if (path.includes("saudi")) {
-    market = "saudi";
-  }
-
-  if (path.includes("riyadh")) {
-    market = "riyadh";
-  }
-
-  if (path.includes("jeddah")) {
-    market = "jeddah";
-  }
-
-  trackCustom("MarketPageView", {
-    market
   });
 }
 
 function initStickyCTA() {
   const sticky = $(".sticky-cta");
-
   if (!sticky) return;
-
-  let lastScroll = 0;
 
   window.addEventListener(
     "scroll",
@@ -723,38 +527,46 @@ function initStickyCTA() {
         sticky.style.transform = "translateY(120%)";
         sticky.style.opacity = "0";
       }
-
-      lastScroll = current;
     },
-    {
-      passive: true
-    }
+    { passive: true }
   );
 }
 
 function initPerformanceTracking() {
   window.addEventListener("load", () => {
-    const timing = performance.now();
-
-    trackCustom("PagePerformance", {
-      load_time_ms: Math.round(timing)
+    dispatchTrackingEvent("PagePerformance", {
+      type: "custom",
+      load_time_ms: Math.round(performance.now())
     });
   });
 }
 
-/* =========================================================
-   APPEND TO INIT
-========================================================= */
+function initPageUX() {
+  dispatchTrackingEvent("LandingPageViewed", {
+    type: "standard",
+    event_name: "ViewContent",
+    content_name: "landing_view",
+    funnel_step: "landing"
+  });
+}
 
-const oldInit = init;
-
-init = function () {
-  oldInit();
-
+function init() {
+  getUtmData();
+  setHiddenTracking();
+  initForm();
+  initReveal();
+  updateSmartProgress();
+  updateLeadScore();
+  handleScroll();
   initScrollDepthTracking();
-  initExitIntent();
-  initSEOInteractions();
-  initMarketTracking();
+  initFAQTracking();
   initStickyCTA();
   initPerformanceTracking();
-};
+  initPageUX();
+
+  window.addEventListener("scroll", handleScroll, { passive: true });
+}
+
+document.readyState === "loading"
+  ? document.addEventListener("DOMContentLoaded", init)
+  : init();
