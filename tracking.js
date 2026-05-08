@@ -1,11 +1,12 @@
 /* =========================================================
    RAWABAT ClientFlow — tracking.js
-   Meta Pixel + Advanced Front-End Tracking
+   Meta Pixel + GA4 + Advanced Front-End Tracking
 ========================================================= */
 
 (function () {
   const TRACKING_CONFIG = {
     pixelId: "910167190291826",
+    ga4Id: "G-PMQECRC15N",
     debug: true,
     sessionStorageKey: "rawabat_session_id",
     utmStorageKey: "rawabat_utm_data",
@@ -14,6 +15,7 @@
 
   const state = {
     pixelLoaded: false,
+    ga4Loaded: false,
     pageViewSent: false,
     initialized: false
   };
@@ -26,46 +28,37 @@
 
   function getSessionId() {
     let id = localStorage.getItem(TRACKING_CONFIG.sessionStorageKey);
-
     if (!id) {
       id = `rb_${Date.now()}_${Math.random().toString(36).slice(2)}`;
       localStorage.setItem(TRACKING_CONFIG.sessionStorageKey, id);
     }
-
     return id;
   }
 
   function getMarket() {
     const path = window.location.pathname.toLowerCase();
-
     if (path.includes("riyadh")) return "riyadh";
     if (path.includes("jeddah")) return "jeddah";
     if (path.includes("saudi")) return "saudi";
-
     return "global";
   }
 
   function getPageType() {
     const path = window.location.pathname.toLowerCase();
-
     if (path === "/" || path === "/index.html") return "homepage";
     if (path.includes("riyadh")) return "local_riyadh";
     if (path.includes("jeddah")) return "local_jeddah";
     if (path.includes("saudi")) return "country_saudi";
-
     return "landing_page";
   }
 
   function getUTMs() {
     const params = new URLSearchParams(window.location.search);
 
-    const stored = (() => {
-      try {
-        return JSON.parse(localStorage.getItem(TRACKING_CONFIG.utmStorageKey) || "{}");
-      } catch {
-        return {};
-      }
-    })();
+    let stored = {};
+    try {
+      stored = JSON.parse(localStorage.getItem(TRACKING_CONFIG.utmStorageKey) || "{}");
+    } catch {}
 
     const data = {
       utm_source: params.get("utm_source") || stored.utm_source || "direct",
@@ -80,7 +73,6 @@
     };
 
     localStorage.setItem(TRACKING_CONFIG.utmStorageKey, JSON.stringify(data));
-
     return data;
   }
 
@@ -112,6 +104,10 @@
     return typeof window.fbq === "function";
   }
 
+  function hasGA4() {
+    return typeof window.gtag === "function";
+  }
+
   function loadMetaPixel() {
     if (hasPixel()) {
       state.pixelLoaded = true;
@@ -120,65 +116,62 @@
 
     !(function (f, b, e, v, n, t, s) {
       if (f.fbq) return;
-
       n = f.fbq = function () {
-        n.callMethod
-          ? n.callMethod.apply(n, arguments)
-          : n.queue.push(arguments);
+        n.callMethod ? n.callMethod.apply(n, arguments) : n.queue.push(arguments);
       };
-
       if (!f._fbq) f._fbq = n;
-
       n.push = n;
       n.loaded = true;
       n.version = "2.0";
       n.queue = [];
-
       t = b.createElement(e);
       t.async = true;
       t.src = v;
-
       s = b.getElementsByTagName(e)[0];
       s.parentNode.insertBefore(t, s);
-    })(
-      window,
-      document,
-      "script",
-      "https://connect.facebook.net/en_US/fbevents.js"
-    );
+    })(window, document, "script", "https://connect.facebook.net/en_US/fbevents.js");
 
     state.pixelLoaded = true;
+  }
+
+  function loadGA4() {
+    if (!TRACKING_CONFIG.ga4Id || TRACKING_CONFIG.ga4Id === "G-PMQECRC15N") {
+      log("GA4_NotConfigured", { reason: "missing_measurement_id" });
+      return;
+    }
+
+    if (hasGA4()) {
+      state.ga4Loaded = true;
+      return;
+    }
+
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = function () {
+      window.dataLayer.push(arguments);
+    };
+
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = `https://www.googletagmanager.com/gtag/js?id=${TRACKING_CONFIG.ga4Id}`;
+    document.head.appendChild(script);
+
+    gtag("js", new Date());
+    gtag("config", TRACKING_CONFIG.ga4Id, {
+      send_page_view: false
+    });
+
+    state.ga4Loaded = true;
   }
 
   function initPixel() {
     loadMetaPixel();
 
     if (!hasPixel()) {
-      log("PixelBlockedOrUnavailable", {
-        reason: "fbq_not_available"
-      });
+      log("PixelBlockedOrUnavailable", { reason: "fbq_not_available" });
       return;
     }
 
     fbq("init", TRACKING_CONFIG.pixelId);
-
-    if (!state.pageViewSent) {
-      const eventID = getEventId("PageView");
-
-      fbq("track", "PageView", basePayload(), { eventID });
-
-      state.pageViewSent = true;
-
-      log("PageView", {
-        eventID,
-        ...basePayload()
-      });
-    }
-
-    trackCustom("MarketPageView", {
-      market: getMarket(),
-      page_type: getPageType()
-    });
   }
 
   function saveEventLog(eventName, payload = {}) {
@@ -189,12 +182,25 @@
         payload,
         at: new Date().toISOString()
       });
-
-      localStorage.setItem(
-        TRACKING_CONFIG.eventStorageKey,
-        JSON.stringify(current.slice(-50))
-      );
+      localStorage.setItem(TRACKING_CONFIG.eventStorageKey, JSON.stringify(current.slice(-50)));
     } catch {}
+  }
+
+  function trackGA4(eventName, payload = {}) {
+    if (!hasGA4()) return;
+
+    gtag("event", eventName, {
+      event_category: "clientflow_restaurants",
+      event_label: payload.source || payload.page_type || "unknown",
+      market: payload.market,
+      page_type: payload.page_type,
+      page_path: payload.page_path,
+      session_id: payload.session_id,
+      utm_source: payload.utm_source,
+      utm_medium: payload.utm_medium,
+      utm_campaign: payload.utm_campaign,
+      value: payload.value || 0
+    });
   }
 
   function trackStandard(eventName, extra = {}) {
@@ -209,6 +215,7 @@
       fbq("track", eventName, payload, { eventID });
     }
 
+    trackGA4(eventName, payload);
     saveEventLog(eventName, payload);
     log(eventName, payload);
   }
@@ -225,26 +232,40 @@
       fbq("trackCustom", eventName, payload, { eventID });
     }
 
+    trackGA4(eventName, payload);
     saveEventLog(eventName, payload);
     log(eventName, payload);
   }
 
-  function handleRawabatTrack(event) {
-    const detail = event.detail || {};
-    const name = detail.name || "CustomEvent";
-    const type = detail.type || "custom";
-    const eventName = detail.event_name || name;
+  function trackInitialPageView() {
+    if (state.pageViewSent) return;
 
-    const payload = { ...detail };
-    delete payload.name;
-    delete payload.type;
-    delete payload.event_name;
+    const eventID = getEventId("PageView");
+    const payload = basePayload({ event_id: eventID });
 
-    if (type === "standard") {
-      trackStandard(eventName, payload);
-    } else {
-      trackCustom(eventName, payload);
+    if (hasPixel()) {
+      fbq("track", "PageView", payload, { eventID });
     }
+
+    if (hasGA4()) {
+      gtag("event", "page_view", {
+        page_title: document.title,
+        page_location: window.location.href,
+        page_path: window.location.pathname,
+        market: getMarket(),
+        page_type: getPageType(),
+        session_id: getSessionId()
+      });
+    }
+
+    state.pageViewSent = true;
+    saveEventLog("PageView", payload);
+    log("PageView", payload);
+
+    trackCustom("MarketPageView", {
+      market: getMarket(),
+      page_type: getPageType()
+    });
   }
 
   function initClickTracking() {
@@ -293,18 +314,15 @@
     });
   }
 
-  function initFormStartedTracking() {
+  function initFormTracking() {
     const form = document.getElementById("smartLeadForm");
     if (!form) return;
 
-    const fields = form.querySelectorAll("input, select, textarea");
-
-    fields.forEach((field) => {
+    form.querySelectorAll("input, select, textarea").forEach((field) => {
       field.addEventListener(
         "focus",
         function () {
           if (form.dataset.trackingStarted === "true") return;
-
           form.dataset.trackingStarted = "true";
 
           trackStandard("Contact", {
@@ -319,6 +337,44 @@
         { once: true }
       );
     });
+
+    form.addEventListener("submit", function () {
+      trackStandard("Lead", {
+        source: "smart_form_submit",
+        lead_type: "form_submit"
+      });
+
+      trackCustom("qualified_lead", {
+        source: "smart_form",
+        value: 1
+      });
+    });
+  }
+
+  function initScrollTracking() {
+    const marks = [25, 50, 75, 90];
+    const sent = new Set();
+
+    window.addEventListener(
+      "scroll",
+      function () {
+        const scrollTop = window.scrollY || document.documentElement.scrollTop;
+        const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+        if (docHeight <= 0) return;
+
+        const percent = Math.round((scrollTop / docHeight) * 100);
+
+        marks.forEach((mark) => {
+          if (percent >= mark && !sent.has(mark)) {
+            sent.add(mark);
+            trackCustom("scroll_depth", {
+              depth: mark
+            });
+          }
+        });
+      },
+      { passive: true }
+    );
   }
 
   function initVisibilityTracking() {
@@ -327,7 +383,6 @@
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden" && !sent) {
         sent = true;
-
         trackCustom("PageHidden", {
           time_on_page_ms: Math.round(performance.now())
         });
@@ -336,16 +391,29 @@
   }
 
   function initEngagedSessionTracking() {
-    let sent = false;
-
     setTimeout(() => {
-      if (sent) return;
-      sent = true;
-
       trackCustom("EngagedSession", {
         time_on_page_seconds: 30
       });
     }, 30000);
+  }
+
+  function handleRawabatTrack(event) {
+    const detail = event.detail || {};
+    const name = detail.name || "CustomEvent";
+    const type = detail.type || "custom";
+    const eventName = detail.event_name || name;
+
+    const payload = { ...detail };
+    delete payload.name;
+    delete payload.type;
+    delete payload.event_name;
+
+    if (type === "standard") {
+      trackStandard(eventName, payload);
+    } else {
+      trackCustom(eventName, payload);
+    }
   }
 
   function init() {
@@ -353,9 +421,13 @@
     state.initialized = true;
 
     getUTMs();
+    loadGA4();
     initPixel();
+    trackInitialPageView();
+
     initClickTracking();
-    initFormStartedTracking();
+    initFormTracking();
+    initScrollTracking();
     initVisibilityTracking();
     initEngagedSessionTracking();
 
