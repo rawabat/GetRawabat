@@ -1,6 +1,7 @@
 /* =========================================================
    RAWABAT ClientFlow — tracking.js
-   Meta Pixel + GA4 + Advanced Front-End Tracking
+   Meta Pixel + GA4 + Advanced WhatsApp Conversion Tracking
+   Version: 12
 ========================================================= */
 
 (function () {
@@ -8,16 +9,24 @@
     pixelId: "910167190291826",
     ga4Id: "G-PMQECRC15N",
     debug: true,
+
     sessionStorageKey: "rawabat_session_id",
     utmStorageKey: "rawabat_utm_data",
-    eventStorageKey: "rawabat_event_log"
+    eventStorageKey: "rawabat_event_log",
+
+    // يمنع تكرار نفس الحدث بسبب تعدد listeners أو double click
+    dedupeWindowMs: 1200,
+
+    // أسماء الفانل
+    funnelName: "clientflow_restaurants"
   };
 
   const state = {
     pixelLoaded: false,
     ga4Loaded: false,
     pageViewSent: false,
-    initialized: false
+    initialized: false,
+    recentEvents: new Map()
   };
 
   function log(name, data = {}) {
@@ -26,12 +35,26 @@
     }
   }
 
+  function safeLocalStorageGet(key, fallback = "") {
+    try {
+      return localStorage.getItem(key) || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function safeLocalStorageSet(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {}
+  }
+
   function getSessionId() {
-    let id = localStorage.getItem(TRACKING_CONFIG.sessionStorageKey);
+    let id = safeLocalStorageGet(TRACKING_CONFIG.sessionStorageKey);
 
     if (!id) {
       id = `rb_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      localStorage.setItem(TRACKING_CONFIG.sessionStorageKey, id);
+      safeLocalStorageSet(TRACKING_CONFIG.sessionStorageKey, id);
     }
 
     return id;
@@ -65,9 +88,11 @@
 
     try {
       stored = JSON.parse(
-        localStorage.getItem(TRACKING_CONFIG.utmStorageKey) || "{}"
+        safeLocalStorageGet(TRACKING_CONFIG.utmStorageKey, "{}")
       );
-    } catch {}
+    } catch {
+      stored = {};
+    }
 
     const data = {
       utm_source: params.get("utm_source") || stored.utm_source || "direct",
@@ -81,7 +106,7 @@
       landing_page: stored.landing_page || window.location.href
     };
 
-    localStorage.setItem(TRACKING_CONFIG.utmStorageKey, JSON.stringify(data));
+    safeLocalStorageSet(TRACKING_CONFIG.utmStorageKey, JSON.stringify(data));
 
     return data;
   }
@@ -91,13 +116,77 @@
       new RegExp("(^| )" + name + "=([^;]+)")
     );
 
-    return match ? match[2] : "";
+    return match ? decodeURIComponent(match[2]) : "";
   }
 
   function getEventId(eventName) {
     return `rb_${eventName}_${Date.now()}_${Math.random()
       .toString(36)
       .slice(2)}`;
+  }
+
+  function getElementText(el) {
+    return String(el?.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120);
+  }
+
+  function isWhatsAppHref(href = "") {
+    const value = String(href || "").toLowerCase();
+
+    return (
+      value.includes("wa.me/") ||
+      value.includes("api.whatsapp.com") ||
+      value.includes("web.whatsapp.com") ||
+      value.includes("whatsapp://")
+    );
+  }
+
+  function getWhatsAppMessageFromHref(href = "") {
+    try {
+      const url = new URL(href, window.location.origin);
+      const text = url.searchParams.get("text") || "";
+      return decodeURIComponent(text).slice(0, 500);
+    } catch {
+      return "";
+    }
+  }
+
+  function getWhatsAppPhoneFromHref(href = "") {
+    try {
+      const url = new URL(href, window.location.origin);
+
+      if (url.hostname.includes("wa.me")) {
+        return url.pathname.replace(/\D/g, "");
+      }
+
+      const phone = url.searchParams.get("phone") || "";
+      return phone.replace(/\D/g, "");
+    } catch {
+      return "";
+    }
+  }
+
+  function getClickPosition(el) {
+    const rect = el.getBoundingClientRect();
+
+    return {
+      element_top: Math.round(rect.top + window.scrollY),
+      element_visible_top: Math.round(rect.top),
+      viewport_height: window.innerHeight,
+      scroll_y: Math.round(window.scrollY)
+    };
+  }
+
+  function getScrollPercent() {
+    const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    if (docHeight <= 0) return 0;
+
+    return Math.max(
+      0,
+      Math.min(100, Math.round((window.scrollY / docHeight) * 100))
+    );
   }
 
   function basePayload(extra = {}) {
@@ -110,6 +199,7 @@
       session_id: getSessionId(),
       fbp: getCookie("_fbp"),
       fbc: getCookie("_fbc"),
+      funnel: TRACKING_CONFIG.funnelName,
       ...getUTMs(),
       ...extra
     };
@@ -219,10 +309,30 @@
     fbq("init", TRACKING_CONFIG.pixelId);
   }
 
+  function shouldDedupe(eventName, payload = {}) {
+    const key = [
+      eventName,
+      payload.source || "",
+      payload.href || "",
+      payload.click_id || ""
+    ].join("|");
+
+    const now = Date.now();
+    const last = state.recentEvents.get(key) || 0;
+
+    if (now - last < TRACKING_CONFIG.dedupeWindowMs) {
+      return true;
+    }
+
+    state.recentEvents.set(key, now);
+
+    return false;
+  }
+
   function saveEventLog(eventName, payload = {}) {
     try {
       const current = JSON.parse(
-        localStorage.getItem(TRACKING_CONFIG.eventStorageKey) || "[]"
+        safeLocalStorageGet(TRACKING_CONFIG.eventStorageKey, "[]")
       );
 
       current.push({
@@ -231,9 +341,9 @@
         at: new Date().toISOString()
       });
 
-      localStorage.setItem(
+      safeLocalStorageSet(
         TRACKING_CONFIG.eventStorageKey,
-        JSON.stringify(current.slice(-50))
+        JSON.stringify(current.slice(-80))
       );
     } catch {}
   }
@@ -255,18 +365,25 @@
       utm_campaign: payload.utm_campaign,
       utm_content: payload.utm_content,
       utm_term: payload.utm_term,
+      click_id: payload.click_id || "",
+      lead_type: payload.lead_type || "",
+      contact_type: payload.contact_type || "",
       value: payload.value || 0
     });
   }
 
   function trackStandard(eventName, extra = {}) {
-    const eventID = getEventId(eventName);
+    const eventID = extra.event_id || getEventId(eventName);
 
     const payload = basePayload({
       event_id: eventID,
-      funnel: "clientflow_restaurants",
       ...extra
     });
+
+    if (shouldDedupe(eventName, payload)) {
+      log("Deduped_" + eventName, payload);
+      return payload;
+    }
 
     if (hasPixel()) {
       fbq("track", eventName, payload, {
@@ -277,16 +394,22 @@
     trackGA4(eventName, payload);
     saveEventLog(eventName, payload);
     log(eventName, payload);
+
+    return payload;
   }
 
   function trackCustom(eventName, extra = {}) {
-    const eventID = getEventId(eventName);
+    const eventID = extra.event_id || getEventId(eventName);
 
     const payload = basePayload({
       event_id: eventID,
-      funnel: "clientflow_restaurants",
       ...extra
     });
+
+    if (shouldDedupe(eventName, payload)) {
+      log("Deduped_" + eventName, payload);
+      return payload;
+    }
 
     if (hasPixel()) {
       fbq("trackCustom", eventName, payload, {
@@ -297,6 +420,8 @@
     trackGA4(eventName, payload);
     saveEventLog(eventName, payload);
     log(eventName, payload);
+
+    return payload;
   }
 
   function trackInitialPageView() {
@@ -336,49 +461,152 @@
     });
   }
 
+  function buildClickPayload(el, source, href, extra = {}) {
+    return {
+      source,
+      href,
+      element_text: getElementText(el),
+      element_id: el.id || "",
+      element_classes: String(el.className || "").slice(0, 180),
+      scroll_percent: getScrollPercent(),
+      ...getClickPosition(el),
+      ...extra
+    };
+  }
+
+  function trackWhatsAppClick(el, source, href) {
+    const clickId = `wa_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const message = getWhatsAppMessageFromHref(href);
+    const phone = getWhatsAppPhoneFromHref(href);
+
+    safeLocalStorageSet("rawabat_last_whatsapp_click_id", clickId);
+    safeLocalStorageSet("rawabat_last_whatsapp_source", source);
+    safeLocalStorageSet("rawabat_last_whatsapp_href", href);
+    safeLocalStorageSet("rawabat_last_whatsapp_at", new Date().toISOString());
+
+    const payload = buildClickPayload(el, source, href, {
+      click_id: clickId,
+      destination: "whatsapp",
+      channel: "whatsapp",
+      intent: "demo_request",
+      lead_type: "whatsapp_demo_request",
+      contact_type: "whatsapp_click",
+      funnel_step: "cta_to_whatsapp",
+      whatsapp_phone: phone,
+      whatsapp_message: message,
+      value: 1
+    });
+
+    // Standard Meta events
+    trackStandard("Lead", payload);
+    trackStandard("Contact", payload);
+
+    // مفيد كإشارة قوية للـ Pixel حتى لو Meta لم يحسب Messaging Started
+    trackStandard("InitiateCheckout", {
+      ...payload,
+      checkout_type: "whatsapp_demo_request"
+    });
+
+    // Custom events للقراءة والتحسين داخل Events Manager
+    trackCustom("whatsapp_click", payload);
+    trackCustom("QualifiedLead", payload);
+    trackCustom("whatsapp_demo_request", payload);
+
+    return payload;
+  }
+
+  function trackRegularLeadClick(el, source, href) {
+    const payload = buildClickPayload(el, source, href, {
+      lead_type: "cta_click"
+    });
+
+    trackStandard("Lead", payload);
+    trackCustom("cta_click", payload);
+
+    return payload;
+  }
+
+  function trackContactClick(el, source, href) {
+    const isWhatsApp = isWhatsAppHref(href);
+
+    if (isWhatsApp) {
+      return trackWhatsAppClick(el, source, href);
+    }
+
+    const payload = buildClickPayload(el, source, href, {
+      contact_type: "cta_click"
+    });
+
+    trackStandard("Contact", payload);
+    trackCustom("form_start", payload);
+
+    return payload;
+  }
+
   function initClickTracking() {
     document.querySelectorAll("[data-track-lead]").forEach((el) => {
-      el.addEventListener("click", function () {
-        const source = el.dataset.trackLead || "unknown_lead_click";
-        const href = el.getAttribute("href") || "";
+      el.addEventListener(
+        "click",
+        function () {
+          const source = el.dataset.trackLead || "unknown_lead_click";
+          const href = el.getAttribute("href") || "";
 
-        trackStandard("Lead", {
-          source,
-          lead_type: "cta_click",
-          href
-        });
+          if (isWhatsAppHref(href)) {
+            trackWhatsAppClick(el, source, href);
+            return;
+          }
 
-        trackCustom("whatsapp_click", {
-          source,
-          href
-        });
-      });
+          trackRegularLeadClick(el, source, href);
+        },
+        {
+          capture: true
+        }
+      );
     });
 
     document.querySelectorAll("[data-track-contact]").forEach((el) => {
-      el.addEventListener("click", function () {
-        const source = el.dataset.trackContact || "unknown_contact_click";
-        const href = el.getAttribute("href") || "";
+      el.addEventListener(
+        "click",
+        function () {
+          const source = el.dataset.trackContact || "unknown_contact_click";
+          const href = el.getAttribute("href") || "";
 
-        trackStandard("Contact", {
-          source,
-          contact_type: "cta_click",
-          href
-        });
-
-        trackCustom("form_start", {
-          source,
-          href
-        });
-      });
+          trackContactClick(el, source, href);
+        },
+        {
+          capture: true
+        }
+      );
     });
 
     document.querySelectorAll("a[href^='mailto:']").forEach((el) => {
       el.addEventListener("click", function () {
         trackCustom("email_click", {
-          source: el.href
+          source: "email_link",
+          href: el.href,
+          element_text: getElementText(el)
         });
       });
+    });
+
+    // احتياط: أي رابط واتساب لا يحمل data-track-lead أو data-track-contact
+    document.querySelectorAll("a[href]").forEach((el) => {
+      const href = el.getAttribute("href") || "";
+      const hasManualTracking =
+        el.hasAttribute("data-track-lead") ||
+        el.hasAttribute("data-track-contact");
+
+      if (!isWhatsAppHref(href) || hasManualTracking) return;
+
+      el.addEventListener(
+        "click",
+        function () {
+          trackWhatsAppClick(el, "auto_whatsapp_link", href);
+        },
+        {
+          capture: true
+        }
+      );
     });
   }
 
@@ -397,11 +625,13 @@
 
           trackStandard("Contact", {
             source: "smart_form_started",
-            contact_type: "form_focus"
+            contact_type: "form_focus",
+            funnel_step: "form_start"
           });
 
           trackCustom("form_started", {
-            source: "smart_form"
+            source: "smart_form",
+            funnel_step: "form_start"
           });
         },
         {
@@ -413,23 +643,25 @@
     form.addEventListener("submit", function () {
       const data = new FormData(form);
 
-      trackStandard("Lead", {
+      const payload = {
         source: "smart_form_submit",
         lead_type: "form_submit",
+        funnel_step: "form_submit_to_whatsapp",
         location: data.get("location") || "",
         branches: data.get("branches") || "",
         messages: data.get("messages") || "",
-        package: data.get("package") || ""
+        package: data.get("package") || "",
+        value: 1
+      };
+
+      trackStandard("Lead", payload);
+      trackStandard("Contact", {
+        ...payload,
+        contact_type: "form_submit"
       });
 
-      trackCustom("qualified_lead", {
-        source: "smart_form",
-        value: 1,
-        location: data.get("location") || "",
-        branches: data.get("branches") || "",
-        messages: data.get("messages") || "",
-        package: data.get("package") || ""
-      });
+      trackCustom("qualified_lead", payload);
+      trackCustom("QualifiedLead", payload);
     });
   }
 
@@ -440,13 +672,7 @@
     window.addEventListener(
       "scroll",
       function () {
-        const scrollTop = window.scrollY || document.documentElement.scrollTop;
-        const docHeight =
-          document.documentElement.scrollHeight - window.innerHeight;
-
-        if (docHeight <= 0) return;
-
-        const percent = Math.round((scrollTop / docHeight) * 100);
+        const percent = getScrollPercent();
 
         marks.forEach((mark) => {
           if (percent >= mark && !sent.has(mark)) {
@@ -500,6 +726,52 @@
     delete payload.type;
     delete payload.event_name;
 
+    // لو main.js فتح واتساب عن طريق openTrackedWhatsApp
+    if (
+      name === "WhatsAppClick" ||
+      eventName === "WhatsAppClick" ||
+      payload.lead_type === "whatsapp_click"
+    ) {
+      const virtualEl = {
+        id: "",
+        className: "js-open-tracked-whatsapp",
+        textContent: payload.source || "open_tracked_whatsapp",
+        getBoundingClientRect: function () {
+          return {
+            top: 0,
+            left: 0,
+            width: 0,
+            height: 0
+          };
+        }
+      };
+
+      const source = payload.source || "open_tracked_whatsapp";
+      const href = payload.href || "";
+
+      const waPayload = {
+        ...payload,
+        source,
+        href,
+        destination: "whatsapp",
+        channel: "whatsapp",
+        intent: "demo_request",
+        lead_type: "whatsapp_demo_request",
+        contact_type: "whatsapp_click",
+        funnel_step: payload.funnel_step || "js_to_whatsapp",
+        value: 1
+      };
+
+      trackStandard("Lead", waPayload);
+      trackStandard("Contact", waPayload);
+      trackStandard("InitiateCheckout", waPayload);
+      trackCustom("whatsapp_click", waPayload);
+      trackCustom("QualifiedLead", waPayload);
+      trackCustom("whatsapp_demo_request", waPayload);
+
+      return;
+    }
+
     if (type === "standard") {
       trackStandard(eventName, payload);
     } else {
@@ -525,6 +797,13 @@
     initEngagedSessionTracking();
 
     window.addEventListener("rawabat:track", handleRawabatTrack);
+
+    log("TrackingInitialized", {
+      pixel_id: TRACKING_CONFIG.pixelId,
+      ga4_id: TRACKING_CONFIG.ga4Id,
+      market: getMarket(),
+      page_type: getPageType()
+    });
   }
 
   document.readyState === "loading"
@@ -534,8 +813,10 @@
   window.RawabatTracking = {
     trackStandard,
     trackCustom,
+    trackWhatsAppClick,
     basePayload,
     getMarket,
+    getPageType,
     getUTMs
   };
 })();
